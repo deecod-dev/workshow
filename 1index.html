@@ -31,8 +31,6 @@
         <p>Start: (<span id="startX">?</span>, <span id="startY">?</span>)</p>
         <p>End: (<span id="endX">?</span>, <span id="endY">?</span>)</p>
         <label>Desired Width (w): <input type="number" id="w" value="20" step="1" min="0"></label>
-        <p id="pathStatus"></p>
-        <p id="intersectionStatus"></p>
     </div>
     <canvas id="canvas"></canvas>
 
@@ -234,18 +232,6 @@
                 ctx.arc(p.x * scaleFactor, p.y * scaleFactor, 3, 0, 2 * Math.PI);
                 ctx.fill();
             }
-            if (startPoint) {
-                ctx.fillStyle = 'white';
-                ctx.beginPath();
-                ctx.arc(startPoint.x * scaleFactor, startPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
-                ctx.fill();
-            }
-            if (endPoint) {
-                ctx.fillStyle = 'yellow';
-                ctx.beginPath();
-                ctx.arc(endPoint.x * scaleFactor, endPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
-                ctx.fill();
-            }
             if (path) {
                 ctx.strokeStyle = 'black';
                 ctx.lineWidth = 1;
@@ -255,6 +241,14 @@
                     ctx.lineTo(path[i].x * scaleFactor, path[i].y * scaleFactor);
                 }
                 ctx.stroke();
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(startPoint.x * scaleFactor, startPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = 'yellow';
+                ctx.beginPath();
+                ctx.arc(endPoint.x * scaleFactor, endPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
+                ctx.fill();
             }
         }
 
@@ -554,13 +548,11 @@
             const k_desired = w / 2;
             path = null;
             pathDilated = null;
-            let foundWithDesiredWidth = false;
-            let final_k = 0;
+
             let tempPath = pathExists(k_desired);
             if (tempPath) {
                 path = tempPath;
-                final_k = k_desired;
-                foundWithDesiredWidth = true;
+                console.log(`Path found with width ${w} pixels`);
             } else {
                 let low = 0;
                 let high = k_desired;
@@ -571,18 +563,19 @@
                     if (tempPath) {
                         low = mid;
                         path = tempPath;
-                        final_k = mid;
                     } else {
                         high = mid;
                     }
                 }
-                if (!path) {
-                    path = null;
+                if (path) {
+                    console.log(`Path found with maximum possible width ${2 * low} pixels`);
                 } else {
-                    final_k = low;
+                    console.log("No path found with any width respecting the clearance.");
                 }
             }
+
             if (path) {
+                const final_k = pathExists(k_desired) ? k_desired : low;
                 pathDilated = new Array(n).fill().map(() => new Array(n).fill(false));
                 for (const { y, x } of path) {
                     const minI = Math.max(0, Math.floor(y - final_k));
@@ -597,27 +590,6 @@
                         }
                     }
                 }
-            }
-            const pathStatus = document.getElementById('pathStatus');
-            const intersectionStatus = document.getElementById('intersectionStatus');
-            if (path) {
-                if (foundWithDesiredWidth) {
-                    pathStatus.textContent = `Path found with desired width w = ${w.toFixed(2)}`;
-                } else {
-                    pathStatus.textContent = `Path found with maximum possible width = ${(2 * final_k).toFixed(2)}`;
-                }
-                let intersects = false;
-                for (let i = 0; i < n && !intersects; i++) {
-                    for (let j = 0; j < n && !intersects; j++) {
-                        if (pathDilated[i][j] && heightMap[i][j] >= threshold) {
-                            intersects = true;
-                        }
-                    }
-                }
-                intersectionStatus.textContent = intersects ? "Path intersects with no-go regions" : "Path does not intersect with no-go regions";
-            } else {
-                pathStatus.textContent = "No path found with any width";
-                intersectionStatus.textContent = "No path available to check for intersections";
             }
             renderAll();
         }
