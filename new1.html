@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Height Map Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        canvas { border: 1px solid black; }
+        #inputForm, #centerForm, #pathForm { margin-bottom: 20px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <h1>Height Map Generator</h1>
+    <div id="inputForm">
+        <label>Map Size (n): <input type="number" id="n" value="200" min="50" max="500"></label><br>
+        <label>Threshold: <input type="number" id="threshold" value="3" step="0.1" min="0"></label><br>
+        <label>Ellipse a: <input type="number" id="a" value="82" min="10"></label><br>
+        <label>Ellipse b: <input type="number" id="b" value="60" min="10"></label><br>
+        <label>Angle (degrees): <input type="number" id="angleDeg" value="0" step="1"></label><br>
+        <button onclick="generateHeightMap()">Generate Map</button>
+    </div>
+    <div id="centerForm" class="hidden">
+        <p>Click on the canvas to set the center coordinates.</p>
+        <p>Center: (<span id="centerX">?</span>, <span id="centerY">?</span>)</p>
+    </div>
+    <div id="pathForm" class="hidden">
+        <button onclick="selectPathPoints()">Select Path Points</button>
+        <button onclick="showPath()">Show Path</button>
+        <p>Start: (<span id="startX">?</span>, <span id="startY">?</span>)</p>
+        <p>End: (<span id="endX">?</span>, <span id="endY">?</span>)</p>
+        <label>Desired Width (w): <input type="number" id="w" value="20" step="1" min="0"></label>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let heightMap, scaleFactor = 4, n, threshold, startX, startY, controlPoints = [], polygonPoints = [];
+        let selectedPointIndex = -1;
+        let offscreenCanvas, offscreenCtx;
+        let distanceToObstacles, distanceToBoundary, startPoint = null, endPoint = null, path = null, pathDilated = null;
+        let isSelectingPath = false;
+
+        function generateHeightMap() {
+            n = parseInt(document.getElementById('n').value);
+            threshold = parseFloat(document.getElementById('threshold').value);
+            const a = parseFloat(document.getElementById('a').value);
+            const b = parseFloat(document.getElementById('b').value);
+            const angleDeg = parseFloat(document.getElementById('angleDeg').value);
+
+            canvas.width = n * scaleFactor;
+            canvas.height = n * scaleFactor;
+
+            offscreenCanvas = document.createElement('canvas');
+            offscreenCanvas.width = n;
+            offscreenCanvas.height = n;
+            offscreenCtx = offscreenCanvas.getContext('2d');
+
+            heightMap = new Array(n).fill().map(() => new Array(n).fill(0));
+            const seed = 41, blobCount = Math.floor(n / 10), margin = Math.floor(n / 20);
+            const rng = new Math.seedrandom(seed);
+            for (let b = 0; b < blobCount; b++) {
+                const cy = margin + Math.floor(rng() * (n - 2 * margin));
+                const cx = margin + Math.floor(rng() * (n - 2 * margin));
+                const radius = (n / 40) + (n / 7 - n / 40) * rng();
+                const peak = 5 + 5 * rng();
+                const numPts = 8 + Math.floor(rng() * 8);
+                const angles = Array.from({ length: numPts }, (_, k) => 2 * Math.PI * k / numPts);
+                const radii = angles.map(() => radius * (0.5 + 0.5 * rng()));
+                const xs = angles.map((angle, k) => cx + radii[k] * Math.cos(angle));
+                const ys = angles.map((angle, k) => cy + radii[k] * Math.sin(angle));
+
+                const minX = Math.max(0, Math.floor(Math.min(...xs)));
+                const maxX = Math.min(n - 1, Math.ceil(Math.max(...xs)));
+                const minY = Math.max(0, Math.floor(Math.min(...ys)));
+                const maxY = Math.min(n - 1, Math.ceil(Math.max(...ys)));
+
+                for (let i = minY; i <= maxY; i++) {
+                    for (let j = minX; j <= maxX; j++) {
+                        if (isPointInPolygon(j, i, xs, ys)) {
+                            const d = Math.sqrt((i - cy) ** 2 + (j - cx) ** 2);
+                            const dMax = Math.max(...xs.map((x, k) => Math.sqrt((ys[k] - cy) ** 2 + (x - cx) ** 2)));
+                            const h = Math.max(0, 1 - d / dMax) * peak;
+                            heightMap[i][j] = Math.max(heightMap[i][j], h);
+                        }
+                    }
+                }
+            }
+
+            distanceToObstacles = computeDistanceToObstacles();
+            distanceToBoundary = computeDistanceToBoundary(n);
+
+            renderHeightMap();
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(offscreenCanvas, 0, 0, n * scaleFactor, n * scaleFactor);
+
+            document.getElementById('inputForm').classList.add('hidden');
+            document.getElementById('centerForm').classList.remove('hidden');
+            canvas.addEventListener('click', setCenterCoordinates);
+        }
+
+        function renderHeightMap() {
+            const imageData = offscreenCtx.createImageData(n, n);
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    const color = getColor(heightMap[i][j]);
+                    const idx = (i * n + j) * 4;
+                    imageData.data[idx] = color.r;
+                    imageData.data[idx + 1] = color.g;
+                    imageData.data[idx + 2] = color.b;
+                    imageData.data[idx + 3] = 255;
+                }
+            }
+            if (pathDilated) {
+                for (let i = 0; i < n; i++) {
+                    for (let j = 0; j < n; j++) {
+                        if (pathDilated[i][j]) {
+                            const idx = (i * n + j) * 4;
+                            imageData.data[idx] = 255;
+                            imageData.data[idx + 1] = 0;
+                            imageData.data[idx + 2] = 0;
+                            imageData.data[idx + 3] = 128;
+                        }
+                    }
+                }
+            }
+            offscreenCtx.putImageData(imageData, 0, 0);
+        }
+
+        function getColor(height) {
+            if (height <= 0) return { r: 0, g: 0, b: 255 };
+            if (height <= 2) {
+                const t = height / 2;
+                return { r: 0, g: Math.floor(255 * t), b: Math.floor(255 * (1 - t)) };
+            }
+            if (height <= 5) {
+                const t = (height - 2) / 3;
+                return { r: Math.floor(139 * t), g: Math.floor(255 * (1 - t) + 69 * t), b: Math.floor(19 * t) };
+            }
+            const t = (height - 5) / 5;
+            return { r: Math.floor(139 * (1 - t) + 255 * t), g: Math.floor(69 * (1 - t) + 255 * t), b: Math.floor(19 * (1 - t) + 255 * t) };
+        }
+
+        function isPointInPolygon(x, y, xs, ys) {
+            let inside = false;
+            for (let i = 0, j = xs.length - 1; i < xs.length; j = i++) {
+                if ((ys[i] > y) !== (ys[j] > y) && x < (xs[j] - xs[i]) * (y - ys[i]) / (ys[j] - ys[i]) + xs[i]) {
+                    inside = !inside;
+                }
+            }
+            return inside;
+        }
+
+        function setCenterCoordinates(event) {
+            const rect = canvas.getBoundingClientRect();
+            startX = Math.floor((event.clientX - rect.left) / scaleFactor);
+            startY = Math.floor((event.clientY - rect.top) / scaleFactor);
+            document.getElementById('centerX').textContent = startX;
+            document.getElementById('centerY').textContent = startY;
+            canvas.removeEventListener('click', setCenterCoordinates);
+            initializeEllipse();
+            renderAll();
+            setupInteraction();
+            document.getElementById('pathForm').classList.remove('hidden');
+        }
+
+        function initializeEllipse() {
+            const a = parseFloat(document.getElementById('a').value) / scaleFactor;
+            const b = parseFloat(document.getElementById('b').value) / scaleFactor;
+            const angle = Math.toRadians(parseFloat(document.getElementById('angleDeg').value));
+            const cx = startX, cy = startY;
+            controlPoints = [];
+            for (let k = 0; k < 8; k++) {
+                const theta = k * (Math.PI / 4);
+                const x = cx + (Math.cos(angle) * a * Math.cos(theta) - Math.sin(angle) * b * Math.sin(theta));
+                const y = cy + (Math.sin(angle) * a * Math.cos(theta) + Math.cos(angle) * b * Math.sin(theta));
+                controlPoints.push({ x, y });
+            }
+            computePolygonPoints();
+        }
+
+        function computePolygonPoints() {
+            polygonPoints = [];
+            const numSegments = controlPoints.length;
+            const pointsPerSegment = 10;
+            for (let i = 0; i < numSegments; i++) {
+                const P0 = controlPoints[(i - 1 + numSegments) % numSegments];
+                const P1 = controlPoints[i];
+                const P2 = controlPoints[(i + 1) % numSegments];
+                const P3 = controlPoints[(i + 2) % numSegments];
+                for (let k = 0; k <= pointsPerSegment; k++) {
+                    const t = k / pointsPerSegment;
+                    const x = 0.5 * (2 * P1.x + (-P0.x + P2.x) * t + (2 * P0.x - 5 * P1.x + 4 * P2.x - P3.x) * t * t +
+                        (-P0.x + 3 * P1.x - 3 * P2.x + P3.x) * t * t * t);
+                    const y = 0.5 * (2 * P1.y + (-P0.y + P2.y) * t + (2 * P0.y - 5 * P1.y + 4 * P2.y - P3.y) * t * t +
+                        (-P0.y + 3 * P1.y - 3 * P2.y + P3.y) * t * t * t);
+                    polygonPoints.push({ x, y });
+                }
+            }
+        }
+
+        function renderAll() {
+            renderHeightMap();
+            const allowedContours = computeAllowedContours();
+            offscreenCtx.strokeStyle = 'black';
+            offscreenCtx.lineWidth = 1;
+            for (const contour of allowedContours) {
+                offscreenCtx.beginPath();
+                offscreenCtx.moveTo(contour[0].x, contour[0].y);
+                for (let i = 1; i < contour.length; i++) {
+                    offscreenCtx.lineTo(contour[i].x, contour[i].y);
+                }
+                offscreenCtx.closePath();
+                offscreenCtx.stroke();
+            }
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(offscreenCanvas, 0, 0, n * scaleFactor, n * scaleFactor);
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(polygonPoints[0].x * scaleFactor, polygonPoints[0].y * scaleFactor);
+            for (let i = 1; i < polygonPoints.length; i++) {
+                ctx.lineTo(polygonPoints[i].x * scaleFactor, polygonPoints[i].y * scaleFactor);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fillStyle = 'green';
+            for (const p of controlPoints) {
+                ctx.beginPath();
+                ctx.arc(p.x * scaleFactor, p.y * scaleFactor, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+            if (path) {
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(path[0].x * scaleFactor, path[0].y * scaleFactor);
+                for (let i = 1; i < path.length; i++) {
+                    ctx.lineTo(path[i].x * scaleFactor, path[i].y * scaleFactor);
+                }
+                ctx.stroke();
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(startPoint.x * scaleFactor, startPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = 'yellow';
+                ctx.beginPath();
+                ctx.arc(endPoint.x * scaleFactor, endPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+
+        function computeAllowedContours() {
+            const blocked = heightMap.map(row => row.map(h => h >= threshold));
+            const mergeDist = 5;
+            let blockedClosed = blocked;
+            if (mergeDist > 0) {
+                blockedClosed = erode(dilate(blocked, mergeDist), mergeDist);
+            }
+            const splineMask = new Array(n).fill().map(() => new Array(n).fill(false));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    splineMask[i][j] = isPointInPolygon(j + 0.5, i + 0.5, polygonPoints.map(p => p.x), polygonPoints.map(p => p.y));
+                }
+            }
+            const allowedMask = splineMask.map((row, i) => row.map((val, j) => val && !blockedClosed[i][j]));
+            const connectedAllowed = floodFill(allowedMask, startY, startX);
+            const boundaryMask = computeBoundaryMask(connectedAllowed);
+            return findContours(boundaryMask).filter(contour => isPointInsideContour(contour, startX, startY));
+        }
+
+        function floodFill(mask, sy, sx) {
+            const reachable = new Array(n).fill().map(() => new Array(n).fill(false));
+            if (!mask[sy][sx]) return reachable;
+            const queue = [{ x: sx, y: sy }];
+            reachable[sy][sx] = true;
+            const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+            while (queue.length) {
+                const { x, y } = queue.shift();
+                for (const [dy, dx] of dirs) {
+                    const ny = y + dy, nx = x + dx;
+                    if (ny >= 0 && ny < n && nx >= 0 && nx < n && mask[ny][nx] && !reachable[ny][nx]) {
+                        reachable[ny][nx] = true;
+                        queue.push({ x: nx, y: ny });
+                    }
+                }
+            }
+            return reachable;
+        }
+
+        function computeBoundaryMask(mask) {
+            const boundary = new Array(n).fill().map(() => new Array(n).fill(false));
+            const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (mask[i][j]) {
+                        for (const [di, dj] of dirs) {
+                            const ni = i + di, nj = j + dj;
+                            if (ni < 0 || ni >= n || nj < 0 || nj >= n || !mask[ni][nj]) {
+                                boundary[i][j] = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return boundary;
+        }
+
+        function findContours(image) {
+            const visited = new Array(n).fill().map(() => new Array(n).fill(false));
+            const contours = [];
+            const dy = [-1, -1, 0, 1, 1, 1, 0, -1];
+            const dx = [0, 1, 1, 1, 0, -1, -1, -1];
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (image[i][j] && !visited[i][j]) {
+                        let startY = i, startX = j, currY = startY, currX = startX, dir = 2;
+                        const contour = [];
+                        let firstStep = true;
+                        while (true) {
+                            contour.push({ x: currX, y: currY });
+                            visited[currY][currX] = true;
+                            let found = false;
+                            const searchStart = (dir + 6) % 8;
+                            for (let k = 0; k < 8; k++) {
+                                const d = (searchStart + k) % 8;
+                                const ny = currY + dy[d];
+                                const nx = currX + dx[d];
+                                if (ny >= 0 && ny < n && nx >= 0 && nx < n && image[ny][nx] && !visited[ny][nx]) {
+                                    currY = ny;
+                                    currX = nx;
+                                    dir = d;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found || (!firstStep && currY === startY && currX === startX)) break;
+                            firstStep = false;
+                        }
+                        if (contour.length) contours.push(contour);
+                    }
+                }
+            }
+            return contours;
+        }
+
+        function isPointInsideContour(contour, px, py) {
+            let count = 0;
+            for (let i = 0, j = contour.length - 1; i < contour.length; j = i++) {
+                const p1 = contour[i], p2 = contour[j];
+                if ((p1.y > py) !== (p2.y > py) && px < (p2.x - p1.x) * (py - p1.y) / (p2.y - p1.y) + p1.x) {
+                    count++;
+                }
+            }
+            return (count % 2) === 1;
+        }
+
+        function dilate(input, dist) {
+            const output = new Array(n).fill().map(() => new Array(n).fill(false));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    for (let di = -dist; di <= dist; di++) {
+                        for (let dj = -dist; dj <= dist; dj++) {
+                            const ni = i + di, nj = j + dj;
+                            if (ni >= 0 && ni < n && nj >= 0 && nj < n && input[ni][nj]) {
+                                output[i][j] = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return output;
+        }
+
+        function erode(input, dist) {
+            const output = new Array(n).fill().map(() => new Array(n).fill(false));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    let keep = true;
+                    for (let di = -dist; di <= dist; di++) {
+                        for (let dj = -dist; dj <= dist; dj++) {
+                            const ni = i + di, nj = j + dj;
+                            if (ni < 0 || ni >= n || nj < 0 || nj >= n || !input[ni][nj]) {
+                                keep = false;
+                                break;
+                            }
+                        }
+                        if (!keep) break;
+                    }
+                    output[i][j] = keep;
+                }
+            }
+            return output;
+        }
+
+        function setupInteraction() {
+            canvas.addEventListener('mousedown', (e) => {
+                if (isSelectingPath) return;
+                const rect = canvas.getBoundingClientRect();
+                const mx = (e.clientX - rect.left) / scaleFactor;
+                const my = (e.clientY - rect.top) / scaleFactor;
+                selectedPointIndex = controlPoints.findIndex(p => Math.hypot(p.x - mx, p.y - my) < 10 / scaleFactor);
+            });
+            canvas.addEventListener('mousemove', (e) => {
+                if (isSelectingPath || selectedPointIndex < 0) return;
+                const rect = canvas.getBoundingClientRect();
+                controlPoints[selectedPointIndex].x = (e.clientX - rect.left) / scaleFactor;
+                controlPoints[selectedPointIndex].y = (e.clientY - rect.top) / scaleFactor;
+                computePolygonPoints();
+                renderAll();
+            });
+            canvas.addEventListener('mouseup', () => {
+                if (!isSelectingPath) selectedPointIndex = -1;
+            });
+        }
+
+        function computeDistanceToObstacles() {
+            const obstacles = heightMap.map(row => row.map(h => h >= threshold));
+            const distance = new Array(n).fill().map(() => new Array(n).fill(Infinity));
+            const queue = [];
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (obstacles[i][j]) {
+                        distance[i][j] = 0;
+                        queue.push({ y: i, x: j });
+                    }
+                }
+            }
+            const dirs = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
+            let index = 0;
+            while (index < queue.length) {
+                const { y, x } = queue[index];
+                index++;
+                for (const [dy, dx] of dirs) {
+                    const ny = y + dy;
+                    const nx = x + dx;
+                    if (ny >= 0 && ny < n && nx >= 0 && nx < n && distance[ny][nx] === Infinity) {
+                        distance[ny][nx] = distance[y][x] + (dy && dx ? Math.sqrt(2) : 1);
+                        queue.push({ y: ny, x: nx });
+                    }
+                }
+            }
+            return distance;
+        }
+
+        function computeDistanceToBoundary(n) {
+            const dist = new Array(n).fill().map(() => new Array(n).fill(0));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    dist[i][j] = Math.min(i, j, n-1-i, n-1-j);
+                }
+            }
+            return dist;
+        }
+
+        function aStar(start, end, costGrid) {
+            const cameFrom = {};
+            const gScore = {};
+            const fScore = {};
+            const openSet = [];
+            const heuristic = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+            gScore[`${start.y},${start.x}`] = 0;
+            fScore[`${start.y},${start.x}`] = heuristic(start, end);
+            openSet.push(start);
+            while (openSet.length > 0) {
+                openSet.sort((a, b) => fScore[`${a.y},${a.x}`] - fScore[`${b.y},${b.x}`]);
+                const current = openSet.shift();
+                if (current.y === end.y && current.x === end.x) {
+                    const path = [];
+                    let temp = current;
+                    while (temp) {
+                        path.push(temp);
+                        temp = cameFrom[`${temp.y},${temp.x}`];
+                    }
+                    return path.reverse();
+                }
+                const dirs = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
+                for (const [dy, dx] of dirs) {
+                    const ny = current.y + dy;
+                    const nx = current.x + dx;
+                    if (ny >= 0 && ny < n && nx >= 0 && nx < n) {
+                        const neighbor = { y: ny, x: nx };
+                        const cost = dy && dx ? Math.sqrt(2) : 1;
+                        const tent_gScore = gScore[`${current.y},${current.x}`] + cost * costGrid[ny][nx];
+                        if (!(`${ny},${nx}` in gScore) || tent_gScore < gScore[`${ny},${nx}`]) {
+                            cameFrom[`${ny},${nx}`] = current;
+                            gScore[`${ny},${nx}`] = tent_gScore;
+                            fScore[`${ny},${nx}`] = tent_gScore + heuristic(neighbor, end);
+                            if (!openSet.some(p => p.y === ny && p.x === nx)) {
+                                openSet.push(neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        function pathExists(k) {
+            const costGrid = new Array(n).fill().map(() => new Array(n).fill(1e6));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (distanceToObstacles[i][j] >= k && distanceToBoundary[i][j] >= k && heightMap[i][j] < threshold) {
+                        costGrid[i][j] = 1;
+                    }
+                }
+            }
+            return aStar(startPoint, endPoint, costGrid);
+        }
+
+        function selectPathPoints() {
+            isSelectingPath = true;
+            let clicks = 0;
+            const clickHandler = (event) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = Math.floor((event.clientX - rect.left) / scaleFactor);
+                const y = Math.floor((event.clientY - rect.top) / scaleFactor);
+                if (heightMap[y][x] >= threshold) {
+                    alert("Selected point is not in free space.");
+                    return;
+                }
+                if (clicks === 0) {
+                    startPoint = { x, y };
+                    document.getElementById('startX').textContent = x;
+                    document.getElementById('startY').textContent = y;
+                } else if (clicks === 1) {
+                    endPoint = { x, y };
+                    document.getElementById('endX').textContent = x;
+                    document.getElementById('endY').textContent = y;
+                    canvas.removeEventListener('click', clickHandler);
+                    isSelectingPath = false;
+                }
+                clicks++;
+            };
+            canvas.addEventListener('click', clickHandler);
+        }
+
+        function showPath() {
+            if (!startPoint || !endPoint) {
+                alert("Please select start and end points first.");
+                return;
+            }
+            const w = parseFloat(document.getElementById('w').value);
+            const k_desired = w / 2;
+            path = null;
+            pathDilated = null;
+
+            let tempPath = pathExists(k_desired);
+            if (tempPath) {
+                path = tempPath;
+                console.log(`Path found with width ${w} pixels`);
+            } else {
+                let low = 0;
+                let high = k_desired;
+                const tolerance = 0.1;
+                while (high - low > tolerance) {
+                    const mid = (low + high) / 2;
+                    tempPath = pathExists(mid);
+                    if (tempPath) {
+                        low = mid;
+                        path = tempPath;
+                    } else {
+                        high = mid;
+                    }
+                }
+                if (path) {
+                    console.log(`Path found with maximum possible width ${2 * low} pixels`);
+                } else {
+                    console.log("No path found with any width respecting the clearance.");
+                }
+            }
+
+            if (path) {
+                const final_k = pathExists(k_desired) ? k_desired : low;
+                pathDilated = new Array(n).fill().map(() => new Array(n).fill(false));
+                for (const { y, x } of path) {
+                    const minI = Math.max(0, Math.floor(y - final_k));
+                    const maxI = Math.min(n - 1, Math.ceil(y + final_k));
+                    const minJ = Math.max(0, Math.floor(x - final_k));
+                    const maxJ = Math.min(n - 1, Math.ceil(x + final_k));
+                    for (let i = minI; i <= maxI; i++) {
+                        for (let j = minJ; j <= maxJ; j++) {
+                            if ((i - y) ** 2 + (j - x) ** 2 <= final_k ** 2) {
+                                pathDilated[i][j] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            renderAll();
+        }
+
+        Math.toRadians = degrees => degrees * Math.PI / 180;
+
+        (function(n){function t(n){this._init(n)}var r=function(){return Math.random()};t.prototype={_init:function(n){this.s0=n%4294967296/4294967296,this.s1=r(),this.s2=r(),this.c=1},random:function(){var n=2091639*this.s0+this.c*2.3283064365386963e-10;return this.s0=this.s1,this.s1=this.s2,this.s2=n-(this.c=0|n),this.s2}},n.seedrandom=function(n){return r=new t(n),function(){return r.random()}}})(Math);
+    </script>
+</body>
+</html>
