@@ -9,7 +9,6 @@
         canvas { border: 1px solid black; }
         #inputForm, #centerForm, #pathForm { margin-bottom: 20px; }
         .hidden { display: none; }
-        #pathInfo { margin-top: 10px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -32,7 +31,8 @@
         <p>Start: (<span id="startX">?</span>, <span id="startY">?</span>)</p>
         <p>End: (<span id="endX">?</span>, <span id="endY">?</span>)</p>
         <label>Desired Width (w): <input type="number" id="w" value="20" step="1" min="0"></label>
-        <div id="pathInfo"></div>
+        <p id="pathStatus"></p>
+        <p id="intersectionStatus"></p>
     </div>
     <canvas id="canvas"></canvas>
 
@@ -42,200 +42,8 @@
         let heightMap, scaleFactor = 4, n, threshold, startX, startY, controlPoints = [], polygonPoints = [];
         let selectedPointIndex = -1;
         let offscreenCanvas, offscreenCtx;
-        let distanceToObstacles, distanceToBoundary, startPoint = null, endPoint = null, pathDilated = null;
+        let distanceToObstacles, distanceToBoundary, startPoint = null, endPoint = null, path = null, pathDilated = null;
         let isSelectingPath = false;
-        let allPaths = [];
-        let desiredWidth = 0;
-        let maxAllowableWidth = 0;
-        let pathColors = [
-            'black', 'blue', 'green', 'magenta', 'orange',
-            'cyan', 'pink', 'purple', 'brown', 'darkorange'
-        ];
-
-        class Node {
-            constructor(point) {
-                this.point = point;
-                this.g = Number.MAX_VALUE;
-                this.h = 0;
-                this.f = Number.MAX_VALUE;
-                this.parent = null;
-            }
-        }
-
-        class MultiPathFinder {
-            constructor(freeSpace, start, end, k, n) {
-                this.freeSpace = freeSpace;
-                this.start = start;
-                this.end = end;
-                this.k = k;
-                this.n = n;
-                this.penalties = Array.from({ length: n }, () => Array(n).fill(0));
-                this.allPaths = [];
-                this.maxPaths = 5;
-            }
-
-            aStar(heuristicWeight = 1.0) {
-                const directions = [
-                    [-1, 0], [1, 0], [0, -1], [0, 1],
-                    [-1, -1], [-1, 1], [1, -1], [1, 1]
-                ];
-                const moveCosts = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
-                
-                let nodes = Array.from({ length: this.n }, (_, y) => 
-                    Array.from({ length: this.n }, (_, x) => new Node({ x, y }))
-                );
-                
-                let startNode = nodes[this.start.y][this.start.x];
-                startNode.g = 0;
-                startNode.h = this.heuristic(startNode.point, this.end);
-                startNode.f = startNode.g + startNode.h * heuristicWeight;
-                
-                let openSet = [startNode];
-                let closedSet = Array.from({ length: this.n }, () => Array(this.n).fill(false));
-                
-                while (openSet.length > 0) {
-                    openSet.sort((a, b) => a.f - b.f);
-                    let current = openSet.shift();
-                    
-                    if (current.point.x === this.end.x && current.point.y === this.end.y) {
-                        let path = [];
-                        let node = current;
-                        while (node !== null) {
-                            path.unshift(node.point);
-                            node = node.parent;
-                        }
-                        return path;
-                    }
-                    
-                    closedSet[current.point.y][current.point.x] = true;
-                    
-                    for (let d = 0; d < directions.length; d++) {
-                        const [dx, dy] = directions[d];
-                        const nx = current.point.x + dx;
-                        const ny = current.point.y + dy;
-                        
-                        if (nx < 0 || nx >= this.n || ny < 0 || ny >= this.n) continue;
-                        if (closedSet[ny][nx]) continue;
-                        
-                        if (!this.freeSpace[ny][nx] || 
-                            distanceToObstacles[ny][nx] < this.k || 
-                            distanceToBoundary[ny][nx] < this.k) continue;
-                        
-                        let neighbor = nodes[ny][nx];
-                        let tentativeG = current.g + moveCosts[d] + this.penalties[ny][nx];
-                        
-                        if (tentativeG < neighbor.g) {
-                            neighbor.parent = current;
-                            neighbor.g = tentativeG;
-                            neighbor.h = this.heuristic(neighbor.point, this.end);
-                            neighbor.f = neighbor.g + neighbor.h * heuristicWeight;
-                            
-                            if (!openSet.includes(neighbor)) {
-                                openSet.push(neighbor);
-                            }
-                        }
-                    }
-                }
-                return null;
-            }
-            
-            heuristic(p1, p2) {
-                return Math.hypot(p1.x - p2.x, p1.y - p2.y);
-            }
-            
-            updatePenalties(path) {
-                const penaltyStrength = 5.0;
-                const sigma = 7.0;
-                const radius = Math.ceil(3 * sigma);
-                
-                for (let p of path) {
-                    if ((p.x === this.start.x && p.y === this.start.y) ||
-                        (p.x === this.end.x && p.y === this.end.y)) continue;
-                    
-                    for (let dy = -radius; dy <= radius; dy++) {
-                        for (let dx = -radius; dx <= radius; dx++) {
-                            const nx = p.x + dx;
-                            const ny = p.y + dy;
-                            
-                            if (nx < 0 || nx >= this.n || ny < 0 || ny >= this.n) continue;
-                            
-                            const distSq = dx * dx + dy * dy;
-                            const penalty = penaltyStrength * Math.exp(-distSq / (2 * sigma * sigma));
-                            this.penalties[ny][nx] += penalty;
-                        }
-                    }
-                }
-            }
-            
-            isPathTooSimilar(newPath) {
-                for (let existingPath of this.allPaths) {
-                    if (this.calculateSimilarity(newPath, existingPath) > 0.8) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            
-            calculateSimilarity(path1, path2) {
-                const set1 = new Set(path1.map(p => `${p.x},${p.y}`));
-                const set2 = new Set(path2.map(p => `${p.x},${p.y}`));
-                
-                const intersection = new Set([...set1].filter(p => set2.has(p)));
-                const union = new Set([...set1, ...set2]);
-                
-                return intersection.size / union.size;
-            }
-            
-            dilatePaths(radius) {
-                let pathMask = Array.from({ length: this.n }, () => Array(this.n).fill(false));
-                for (let path of this.allPaths) {
-                    for (let p of path) {
-                        pathMask[p.y][p.x] = true;
-                    }
-                }
-                
-                let dilated = Array.from({ length: this.n }, () => Array(this.n).fill(false));
-                const r = Math.ceil(radius);
-                
-                for (let y = 0; y < this.n; y++) {
-                    for (let x = 0; x < this.n; x++) {
-                        if (!pathMask[y][x]) continue;
-                        
-                        for (let dy = -r; dy <= r; dy++) {
-                            for (let dx = -r; dx <= r; dx++) {
-                                const nx = x + dx;
-                                const ny = y + dy;
-                                
-                                if (nx < 0 || nx >= this.n || ny < 0 || ny >= this.n) continue;
-                                if (dx * dx + dy * dy <= radius * radius) {
-                                    dilated[ny][nx] = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                return dilated;
-            }
-            
-            findMultiplePaths() {
-                // First path without penalties
-                let firstPath = this.aStar();
-                if (firstPath) {
-                    this.allPaths.push(firstPath);
-                    this.updatePenalties(firstPath);
-                }
-                
-                // Additional paths with penalties
-                for (let i = 1; i < this.maxPaths; i++) {
-                    let newPath = this.aStar();
-                    if (!newPath || this.isPathTooSimilar(newPath)) break;
-                    this.allPaths.push(newPath);
-                    this.updatePenalties(newPath);
-                }
-                
-                return this.allPaths;
-            }
-        }
 
         function generateHeightMap() {
             n = parseInt(document.getElementById('n').value);
@@ -426,45 +234,27 @@
                 ctx.arc(p.x * scaleFactor, p.y * scaleFactor, 3, 0, 2 * Math.PI);
                 ctx.fill();
             }
-
-            // Draw start and end points
             if (startPoint) {
                 ctx.fillStyle = 'white';
                 ctx.beginPath();
-                ctx.arc(startPoint.x * scaleFactor, startPoint.y * scaleFactor, 5, 0, 2 * Math.PI);
+                ctx.arc(startPoint.x * scaleFactor, startPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
                 ctx.fill();
-                ctx.strokeStyle = 'black';
-                ctx.lineWidth = 1;
-                ctx.stroke();
             }
             if (endPoint) {
                 ctx.fillStyle = 'yellow';
                 ctx.beginPath();
-                ctx.arc(endPoint.x * scaleFactor, endPoint.y * scaleFactor, 5, 0, 2 * Math.PI);
+                ctx.arc(endPoint.x * scaleFactor, endPoint.y * scaleFactor, 3, 0, 2 * Math.PI);
                 ctx.fill();
+            }
+            if (path) {
                 ctx.strokeStyle = 'black';
                 ctx.lineWidth = 1;
-                ctx.stroke();
-            }
-
-            // Draw multiple paths
-            for (let idx = 0; idx < allPaths.length; idx++) {
-                const path = allPaths[idx];
-                ctx.strokeStyle = pathColors[idx % pathColors.length];
-                ctx.lineWidth = 2;
                 ctx.beginPath();
                 ctx.moveTo(path[0].x * scaleFactor, path[0].y * scaleFactor);
                 for (let i = 1; i < path.length; i++) {
                     ctx.lineTo(path[i].x * scaleFactor, path[i].y * scaleFactor);
                 }
                 ctx.stroke();
-            }
-
-            // Display path info
-            if (allPaths.length > 0) {
-                ctx.fillStyle = 'black';
-                ctx.font = '12px Arial';
-                ctx.fillText(`Found ${allPaths.length} paths. Desired width: ${desiredWidth}, Max allowable: ${maxAllowableWidth.toFixed(1)}`, 10, 20);
             }
         }
 
@@ -673,6 +463,61 @@
             return dist;
         }
 
+        function aStar(start, end, costGrid) {
+            const cameFrom = {};
+            const gScore = {};
+            const fScore = {};
+            const openSet = [];
+            const heuristic = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+            gScore[`${start.y},${start.x}`] = 0;
+            fScore[`${start.y},${start.x}`] = heuristic(start, end);
+            openSet.push(start);
+            while (openSet.length > 0) {
+                openSet.sort((a, b) => fScore[`${a.y},${a.x}`] - fScore[`${b.y},${b.x}`]);
+                const current = openSet.shift();
+                if (current.y === end.y && current.x === end.x) {
+                    const path = [];
+                    let temp = current;
+                    while (temp) {
+                        path.push(temp);
+                        temp = cameFrom[`${temp.y},${temp.x}`];
+                    }
+                    return path.reverse();
+                }
+                const dirs = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [-1,1], [1,-1], [1,1]];
+                for (const [dy, dx] of dirs) {
+                    const ny = current.y + dy;
+                    const nx = current.x + dx;
+                    if (ny >= 0 && ny < n && nx >= 0 && nx < n) {
+                        const neighbor = { y: ny, x: nx };
+                        const cost = dy && dx ? Math.sqrt(2) : 1;
+                        const tent_gScore = gScore[`${current.y},${current.x}`] + cost * costGrid[ny][nx];
+                        if (!(`${ny},${nx}` in gScore) || tent_gScore < gScore[`${ny},${nx}`]) {
+                            cameFrom[`${ny},${nx}`] = current;
+                            gScore[`${ny},${nx}`] = tent_gScore;
+                            fScore[`${ny},${nx}`] = tent_gScore + heuristic(neighbor, end);
+                            if (!openSet.some(p => p.y === ny && p.x === nx)) {
+                                openSet.push(neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        function pathExists(k) {
+            const costGrid = new Array(n).fill().map(() => new Array(n).fill(1e6));
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < n; j++) {
+                    if (distanceToObstacles[i][j] >= k && distanceToBoundary[i][j] >= k && heightMap[i][j] < threshold) {
+                        costGrid[i][j] = 1;
+                    }
+                }
+            }
+            return aStar(startPoint, endPoint, costGrid);
+        }
+
         function selectPathPoints() {
             isSelectingPath = true;
             let clicks = 0;
@@ -705,43 +550,75 @@
                 alert("Please select start and end points first.");
                 return;
             }
-            
             const w = parseFloat(document.getElementById('w').value);
-            desiredWidth = w;
             const k_desired = w / 2;
-            
-            // Create base free space (without clearance)
-            const baseFreeSpace = heightMap.map(row => row.map(h => h < threshold));
-            
-            let finder = new MultiPathFinder(baseFreeSpace, startPoint, endPoint, k_desired, n);
-            allPaths = finder.findMultiplePaths();
-            
-            let maxAllowableK = k_desired;
-            if (allPaths.length === 0) {
-                // Binary search for maximum k that works
-                let low = 0, high = k_desired;
-                while (high - low > 0.1) {
+            path = null;
+            pathDilated = null;
+            let foundWithDesiredWidth = false;
+            let final_k = 0;
+            let tempPath = pathExists(k_desired);
+            if (tempPath) {
+                path = tempPath;
+                final_k = k_desired;
+                foundWithDesiredWidth = true;
+            } else {
+                let low = 0;
+                let high = k_desired;
+                const tolerance = 0.1;
+                while (high - low > tolerance) {
                     const mid = (low + high) / 2;
-                    finder = new MultiPathFinder(baseFreeSpace, startPoint, endPoint, mid, n);
-                    const paths = finder.findMultiplePaths();
-                    if (paths.length > 0) {
+                    tempPath = pathExists(mid);
+                    if (tempPath) {
                         low = mid;
-                        allPaths = paths;
+                        path = tempPath;
+                        final_k = mid;
                     } else {
                         high = mid;
                     }
                 }
-                maxAllowableK = low;
+                if (!path) {
+                    path = null;
+                } else {
+                    final_k = low;
+                }
             }
-            maxAllowableWidth = 2 * maxAllowableK;
-            
-            // Update path info display
-            document.getElementById('pathInfo').textContent = 
-                `Found ${allPaths.length} paths. Desired width: ${w}, Max allowable: ${maxAllowableWidth.toFixed(1)}`;
-            
-            // Dilate the union of paths for the corridor
-            pathDilated = finder.dilatePaths(maxAllowableK);
-            
+            if (path) {
+                pathDilated = new Array(n).fill().map(() => new Array(n).fill(false));
+                for (const { y, x } of path) {
+                    const minI = Math.max(0, Math.floor(y - final_k));
+                    const maxI = Math.min(n - 1, Math.ceil(y + final_k));
+                    const minJ = Math.max(0, Math.floor(x - final_k));
+                    const maxJ = Math.min(n - 1, Math.ceil(x + final_k));
+                    for (let i = minI; i <= maxI; i++) {
+                        for (let j = minJ; j <= maxJ; j++) {
+                            if ((i - y) ** 2 + (j - x) ** 2 <= final_k ** 2) {
+                                pathDilated[i][j] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            const pathStatus = document.getElementById('pathStatus');
+            const intersectionStatus = document.getElementById('intersectionStatus');
+            if (path) {
+                if (foundWithDesiredWidth) {
+                    pathStatus.textContent = `Path found with desired width w = ${w.toFixed(2)}`;
+                } else {
+                    pathStatus.textContent = `Path found with maximum possible width = ${(2 * final_k).toFixed(2)}`;
+                }
+                let intersects = false;
+                for (let i = 0; i < n && !intersects; i++) {
+                    for (let j = 0; j < n && !intersects; j++) {
+                        if (pathDilated[i][j] && heightMap[i][j] >= threshold) {
+                            intersects = true;
+                        }
+                    }
+                }
+                intersectionStatus.textContent = intersects ? "Path intersects with no-go regions" : "Path does not intersect with no-go regions";
+            } else {
+                pathStatus.textContent = "No path found with any width";
+                intersectionStatus.textContent = "No path available to check for intersections";
+            }
             renderAll();
         }
 
